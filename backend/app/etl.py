@@ -158,18 +158,18 @@ async def load_items(items: list[JsonDict], session: AsyncSession) -> int:
     - Return the number of newly created items
     """
     created = 0
-    labs_by_title: dict[str, ItemRecord] = {}
+    labs_by_key: dict[str, ItemRecord] = {}
 
     for raw in items:
         if raw.get("type") != "lab":
             continue
 
         lab_title = raw.get("title")
-        if not isinstance(lab_title, str):
+        lab_key = raw.get("lab")
+        if not isinstance(lab_title, str) or not isinstance(lab_key, str):
             continue
 
-        cached_lab = labs_by_title.get(lab_title)
-        if cached_lab is not None:
+        if lab_key in labs_by_key:
             continue
 
         existing_lab_result = await session.exec(
@@ -185,29 +185,29 @@ async def load_items(items: list[JsonDict], session: AsyncSession) -> int:
             await session.flush()
             created += 1
 
-        labs_by_title[lab_title] = lab_item
+        labs_by_key[lab_key] = lab_item
 
     for raw in items:
         if raw.get("type") != "task":
             continue
 
         task_title = raw.get("title")
-        lab_title = raw.get("lab")
-        if not isinstance(task_title, str) or not isinstance(lab_title, str):
+        lab_key = raw.get("lab")
+        if not isinstance(task_title, str) or not isinstance(lab_key, str):
             continue
 
-        lab_item = labs_by_title.get(lab_title)
+        lab_item = labs_by_key.get(lab_key)
         if lab_item is None:
             existing_lab_result = await session.exec(
                 select(ItemRecord).where(
                     ItemRecord.type == "lab",
-                    ItemRecord.title == lab_title,
+                    ItemRecord.title == lab_key,
                 )
             )
             lab_item = existing_lab_result.first()
             if lab_item is None:
                 continue
-            labs_by_title[lab_title] = lab_item
+            labs_by_key[lab_key] = lab_item
 
         existing_task_result = await session.exec(
             select(ItemRecord).where(
@@ -229,7 +229,11 @@ async def load_items(items: list[JsonDict], session: AsyncSession) -> int:
     return created
 
 
-async def load_logs(logs: list[JsonDict], session: AsyncSession) -> int:
+async def load_logs(
+    logs: list[JsonDict],
+    session: AsyncSession,
+    api_items: list[JsonDict] | None = None,
+) -> int:
     """Load interaction logs into the database.
 
     TODO: Implement this function.
@@ -257,6 +261,16 @@ async def load_logs(logs: list[JsonDict], session: AsyncSession) -> int:
     - Commit after all inserts
     - Return the number of newly created interactions
     """
+    # Build a lookup from (lab_key, task_key) -> item title using API items
+    title_lookup: dict[tuple[str, str | None], str] = {}
+    if api_items:
+        for raw_item in api_items:
+            lab = raw_item.get("lab")
+            task = raw_item.get("task")
+            title = raw_item.get("title")
+            if isinstance(lab, str) and isinstance(title, str):
+                title_lookup[(lab, task)] = title
+
     created = 0
     learners_by_external_id: dict[str, Learner] = {}
     items_by_key: dict[tuple[str, str], ItemRecord] = {}
@@ -282,20 +296,20 @@ async def load_logs(logs: list[JsonDict], session: AsyncSession) -> int:
                 await session.flush()
             learners_by_external_id[student_id] = learner
 
-        task_title = raw.get("task")
-        lab_title = raw.get("lab")
-        if task_title is not None:
-            if not isinstance(task_title, str):
+        task_key = raw.get("task")
+        lab_key = raw.get("lab")
+        if task_key is not None:
+            if not isinstance(task_key, str):
                 continue
-            item_key = ("task", task_title)
+            item_title = title_lookup.get((lab_key, task_key), task_key)
+            item_key = ("task", item_title)
             item_type = "task"
-            item_title = task_title
         else:
-            if not isinstance(lab_title, str):
+            if not isinstance(lab_key, str):
                 continue
-            item_key = ("lab", lab_title)
+            item_title = title_lookup.get((lab_key, None), lab_key)
+            item_key = ("lab", item_title)
             item_type = "lab"
-            item_title = lab_title
 
         item = items_by_key.get(item_key)
         if item is None:
@@ -391,7 +405,7 @@ async def sync(session: AsyncSession) -> dict[str, int]:
     )
 
     logs = await fetch_logs(since)
-    new_records = await load_logs(logs, session)
+    new_records = await load_logs(logs, session, api_items=items)
 
     total_records = (
         await session.exec(select(func.count()).select_from(InteractionLog))
